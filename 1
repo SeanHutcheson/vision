@@ -1,0 +1,115 @@
+import pandas as pd
+from google.colab import files
+
+def upload_file():
+    print("Please upload your Excel file.")
+    uploaded = files.upload()
+    for file_name in uploaded.keys():
+        print(f"Uploaded file: {file_name}")
+        return file_name
+
+def process_file(file_name):
+    data = pd.read_excel(file_name, header=7)  # Read Excel with headers on row 8
+    data.columns = data.columns.str.strip()  # Trim whitespace from column names
+    
+    bond_name_col = data.iloc[:, 0]  # Bond names
+    portfolio_data = data.iloc[:, 1:8].copy()
+    benchmark_data = data.iloc[:, 8:15].copy()
+    
+    expected_columns = ["Currency", "Country", "Sector", "Rating", "OAS", "OAD", "Subordination"]
+    portfolio_data.columns = expected_columns
+    benchmark_data.columns = expected_columns
+    
+    portfolio_data.insert(0, "Bond_Name", bond_name_col)
+    benchmark_data.insert(0, "Bond_Name", bond_name_col)
+    
+    return portfolio_data.dropna(), benchmark_data.dropna()
+
+def compare_bonds(portfolio_data, benchmark_data, max_spread_pickup=None, relative_spread_pickup=None):
+    result = []
+    for _, portfolio_row in portfolio_data.iterrows():
+        matches = benchmark_data[
+            (benchmark_data["Currency"] == portfolio_row["Currency"]) &
+            (benchmark_data["Country"] == portfolio_row["Country"]) &
+            (benchmark_data["Sector"] == portfolio_row["Sector"]) &
+            (benchmark_data["Rating"] == portfolio_row["Rating"]) &
+            (benchmark_data["Subordination"] == portfolio_row["Subordination"]) &
+            (benchmark_data["OAS"] > portfolio_row["OAS"])
+        ]
+
+        if not matches.empty:
+            best_match = matches.loc[matches["OAS"].idxmax()]
+            spread_pickup = best_match["OAS"] - portfolio_row["OAS"]
+            
+            if (max_spread_pickup is None or spread_pickup < max_spread_pickup) and \
+               (relative_spread_pickup is None or spread_pickup < relative_spread_pickup * portfolio_row["OAS"]):
+                result.append([
+                    portfolio_row["Bond_Name"], portfolio_row["Currency"], portfolio_row["Country"],
+                    portfolio_row["Sector"], portfolio_row["Rating"], portfolio_row["Subordination"],
+                    portfolio_row["OAS"], portfolio_row["OAD"],
+                    best_match["Bond_Name"], best_match["Currency"], best_match["Country"], best_match["Sector"],
+                    best_match["Rating"], best_match["Subordination"], best_match["OAS"], best_match["OAD"], spread_pickup
+                ])
+    
+    return pd.DataFrame(result, columns=[
+        "Portfolio_Bond", "Portfolio_Currency", "Portfolio_Country", "Portfolio_Sector", "Portfolio_Rating", "Portfolio_Subordination", "Portfolio_OAS", "Portfolio_OAD",
+        "Benchmark_Bond", "Benchmark_Currency", "Benchmark_Country", "Benchmark_Sector", "Benchmark_Rating", "Benchmark_Subordination", "Benchmark_OAS", "Benchmark_OAD", "Spread_Pickup"
+    ]).sort_values(by="Spread_Pickup", ascending=False)
+
+def compare_bonds_higher_rating(portfolio_data, benchmark_data):
+    rating_order = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB", "BBB-", 
+                    "BB+", "BB", "BB-", "B+", "B", "B-", "CCC+", "CCC", "CCC-", 
+                    "CC+", "CC", "CC-", "C", "D", "NR"]
+    
+    def clean_rating(rating):
+        return rating.split("/")[0] if isinstance(rating, str) else "NR"
+    
+    result = []
+    for _, portfolio_row in portfolio_data.iterrows():
+        matches = benchmark_data[
+            (benchmark_data["Currency"] == portfolio_row["Currency"]) &
+            (benchmark_data["Country"] == portfolio_row["Country"]) &
+            (benchmark_data["Sector"] == portfolio_row["Sector"]) &
+            (benchmark_data["Subordination"] == portfolio_row["Subordination"]) &
+            (benchmark_data["OAS"] >= 0.9 * portfolio_row["OAS"]) &
+            (benchmark_data["OAS"] <= 1.1 * portfolio_row["OAS"])
+        ]
+        
+        if not matches.empty:
+            matches = matches[matches["Rating"].apply(lambda x: rating_order.index(clean_rating(x)) < rating_order.index(clean_rating(portfolio_row["Rating"])))]
+            if not matches.empty:
+                best_match = matches.loc[matches["Rating"].idxmin()]
+                result.append([
+                    portfolio_row["Bond_Name"], portfolio_row["Currency"], portfolio_row["Country"],
+                    portfolio_row["Sector"], portfolio_row["Rating"], portfolio_row["Subordination"],
+                    portfolio_row["OAS"], portfolio_row["OAD"],
+                    best_match["Bond_Name"], best_match["Currency"], best_match["Country"], best_match["Sector"],
+                    best_match["Rating"], best_match["Subordination"], best_match["OAS"], best_match["OAD"]
+                ])
+    
+    return pd.DataFrame(result, columns=[
+        "Portfolio_Bond", "Portfolio_Currency", "Portfolio_Country", "Portfolio_Sector", "Portfolio_Rating", "Portfolio_Subordination", "Portfolio_OAS", "Portfolio_OAD",
+        "Benchmark_Bond", "Benchmark_Currency", "Benchmark_Country", "Benchmark_Sector", "Benchmark_Rating", "Benchmark_Subordination", "Benchmark_OAS", "Benchmark_OAD"
+    ])
+
+def main():
+    file_name = upload_file()
+    portfolio_data, benchmark_data = process_file(file_name)
+
+    result_df = compare_bonds(portfolio_data, benchmark_data)
+    filtered_result_df = compare_bonds(portfolio_data, benchmark_data, max_spread_pickup=100)
+    relative_result_df = compare_bonds(portfolio_data, benchmark_data, relative_spread_pickup=0.5)
+    higher_rating_df = compare_bonds_higher_rating(portfolio_data, benchmark_data)
+
+    output_file = "Vision_Output.xlsx"
+    with pd.ExcelWriter(output_file) as writer:
+        result_df.to_excel(writer, sheet_name="All Spread Pickups", index=False)
+        filtered_result_df.to_excel(writer, sheet_name="Spread Pickup < 100", index=False)
+        relative_result_df.to_excel(writer, sheet_name="Spread Pickup < Half Spread", index=False)
+        higher_rating_df.to_excel(writer, sheet_name="Similar Spread Higher Rating", index=False)
+    
+    print(f"Output saved to {output_file}")
+    files.download(output_file)
+
+if __name__ == "__main__":
+    main()
